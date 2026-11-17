@@ -1,0 +1,2 @@
+# AOSP Android 13 Automotive reference: HF role only.
+bluetooth.profile.hfp.hf.enabled=true
