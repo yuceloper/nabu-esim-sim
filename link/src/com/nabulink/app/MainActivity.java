@@ -74,7 +74,7 @@ public class MainActivity extends Activity {
                 if(discovery==current&&info.getHost() instanceof Inet4Address&&info.getHost().isSiteLocalAddress()&&info.getPort()==37851){
                     String ip=info.getHost().getHostAddress();scanStatus.setText("Phone found");
                     if(auto){String old=getSharedPreferences("link",MODE_PRIVATE).getString("last_ip","");if(ip.equals(old)){stopScan();action("CLIENT",ip);return;}}
-                    button(devices,info.getServiceName(),()->{stopScan();action(Pairing.load(this,"client")==null?"PAIR":"CLIENT",ip);});
+                    button(devices,info.getServiceName(),()->{stopScan();action(Pairing.load(MainActivity.this,"client")==null?"PAIR":"CLIENT",ip);});
                 }
                 resolveNext();
             });}
