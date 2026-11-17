@@ -15,7 +15,7 @@ final class SmsBridge {
     private final ArrayDeque<JSONObject> inbox=new ArrayDeque<>();
     private final LinkedHashMap<String,JSONObject> results=new LinkedHashMap<>();
     private boolean registered;
-    private final String sentAction="com.nabulink.app.SMS_SENT";
+    private final String sentAction="com.nabulink.app.SMS_SENT."+UUID.randomUUID().toString();
     SmsBridge(Context c){context=c;}
     boolean allowed(String permission){return context.checkSelfPermission(permission)==PackageManager.PERMISSION_GRANTED;}
     boolean enabled(){return context.getSharedPreferences("link",0).getBoolean("sms_enabled",false);}
@@ -48,12 +48,13 @@ final class SmsBridge {
     void start(){
         if(registered)return;
         IntentFilter input=new IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION);
+        IntentFilter output=new IntentFilter(sentAction);output.addDataScheme("nabulink");
         if(Build.VERSION.SDK_INT>=33){
             context.registerReceiver(incoming,input,Manifest.permission.BROADCAST_SMS,null,Context.RECEIVER_EXPORTED);
-            context.registerReceiver(sent,new IntentFilter(sentAction),Context.RECEIVER_NOT_EXPORTED);
+            context.registerReceiver(sent,output,Context.RECEIVER_NOT_EXPORTED);
         }else{
             context.registerReceiver(incoming,input,Manifest.permission.BROADCAST_SMS,null);
-            context.registerReceiver(sent,new IntentFilter(sentAction));
+            context.registerReceiver(sent,output);
         }
         registered=true;
     }
