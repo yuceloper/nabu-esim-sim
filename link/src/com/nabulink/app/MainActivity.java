@@ -16,7 +16,8 @@ public class MainActivity extends Activity {
     private LinearLayout devices;
     private Button approve,reject;
     private TextView smsResult,smsMessages;
-    private Button sendButton;
+    private Button sendButton,dialButton,answerButton,endButton;
+    private TextView callStatus,callOutcome;
     private NsdManager.DiscoveryListener discovery;
     private boolean resolving, auto, visible;
     private final ArrayDeque<NsdServiceInfo> queue=new ArrayDeque<>();
@@ -26,7 +27,7 @@ public class MainActivity extends Activity {
         String v=LinkService.verification;
         approve.setVisibility(v.isEmpty()?8:0);reject.setVisibility(v.isEmpty()?8:0);
         approve.setText("Codes match — "+v);
-        smsResult.setText(LinkService.smsState);sendButton.setEnabled(LinkService.smsAllowed&&!LinkService.smsBusy);renderMessages();
+        smsResult.setText(LinkService.smsState);sendButton.setEnabled(LinkService.smsAllowed&&!LinkService.smsBusy);renderMessages();renderCall();
         handler.postDelayed(this,300);
     }};
     private TextView text(LinearLayout l,String s,int size,int color){
@@ -36,7 +37,7 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle state){
         super.onCreate(state);getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         LinearLayout l=new LinearLayout(this);l.setOrientation(1);int p=(int)(24*getResources().getDisplayMetrics().density);l.setPadding(p,p,p,p);l.setBackgroundColor(0xff101722);
-        text(l,"Nabu Link",32,Color.WHITE);text(l,"SMS BRIDGE / 0.6",13,0xff8ebdf3);
+        text(l,"Nabu Link",32,Color.WHITE);text(l,"CALL BRIDGE / 0.7",13,0xff8ebdf3);
         status=text(l,"Disconnected",24,0xff73dba7);details=text(l,"",17,0xffcfdeef);host=text(l,"",16,0xffcfdeef);
         approve=button(l,"Codes match",()->action("APPROVE",null));reject=button(l,"Reject pairing",()->action("REJECT",null));approve.setVisibility(8);reject.setVisibility(8);
         button(l,"Start phone host",()->{stopScan();remember("host");action("HOST",null);});
@@ -48,6 +49,22 @@ public class MainActivity extends Activity {
         scanStatus=text(l,"",14,0xff8ebdf3);devices=new LinearLayout(this);devices.setOrientation(1);l.addView(devices);
         button(l,"Disconnect / stop host",()->{stopScan();remember("");stopService(new Intent(this,LinkService.class));});
         button(l,"Forget paired device",()->new AlertDialog.Builder(this).setTitle("Forget pairing?").setMessage("The other device must also forget the old pairing.").setNegativeButton("Cancel",null).setPositiveButton("Forget",(d,w)->{stopScan();remember("");stopService(new Intent(this,LinkService.class));Pairing.forget(this);}).show());
+        text(l,"Call Bridge",24,Color.WHITE);
+        button(l,"Enable call sharing on phone",()->new AlertDialog.Builder(this).setTitle("Allow paired tablet to control calls?").setMessage("The paired tablet can place, answer and end carrier calls. Audio stays on this phone. Carrier charges may apply.").setNegativeButton("Cancel",null).setPositiveButton("Enable",(d,w)->{getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("calls_enabled",true).apply();requestPermissions(new String[]{"android.permission.READ_PHONE_STATE","android.permission.CALL_PHONE","android.permission.ANSWER_PHONE_CALLS"},8);}).show());
+        button(l,"Disable call sharing",()->getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("calls_enabled",false).apply());
+        callStatus=text(l,"Call status unavailable",18,0xffcfdeef);
+        EditText dialNumber=new EditText(this);dialNumber.setHint("Phone number");dialNumber.setInputType(android.text.InputType.TYPE_CLASS_PHONE);dialNumber.setTextColor(Color.WHITE);dialNumber.setHintTextColor(0xffa0adbd);l.addView(dialNumber);
+        dialButton=button(l,"Call via phone",()->{
+            String number=dialNumber.getText().toString().replace(" ","").trim();
+            if(!number.matches("\\+?[0-9]{10,15}")){Toast.makeText(this,"Enter full phone number",0).show();return;}
+            String epoch=currentEpoch();
+            new AlertDialog.Builder(this).setTitle("Call "+number+"?").setMessage("Audio stays on the phone. Carrier charges may apply. Emergency calls are not supported.").setNegativeButton("Cancel",null).setPositiveButton("Call",(d,w)->callAction("call_dial",number,epoch)).show();
+        });
+        answerButton=button(l,"Answer incoming call",()->callAction("call_answer",null,currentEpoch()));
+        endButton=button(l,"Decline / end call",()->callAction("call_end",null,currentEpoch()));
+        dialButton.setEnabled(false);answerButton.setEnabled(false);endButton.setEnabled(false);
+        callOutcome=text(l,"",14,0xff8ebdf3);
+        text(l,"Call audio remains on Redmi Note 8.",13,0xffa0adbd);
         text(l,"SMS Bridge",24,Color.WHITE);
         button(l,"Enable SMS sharing on phone",()->new AlertDialog.Builder(this).setTitle("Share SMS with paired tablet?").setMessage("New incoming SMS, including potentially sensitive messages, will be visible on the paired tablet. Sending may incur carrier charges.").setNegativeButton("Cancel",null).setPositiveButton("Enable",(d,w)->{getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_enabled",true).apply();requestPermissions(new String[]{"android.permission.SEND_SMS","android.permission.RECEIVE_SMS"},7);}).show());
         button(l,"Disable SMS sharing",()->getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_enabled",false).apply());
@@ -58,6 +75,22 @@ public class MainActivity extends Activity {
         text(l,"Local Wi-Fi or phone hotspot • Saved pairing follows network changes. Compare codes only for first pairing.",13,0xffa0adbd);
         ScrollView scroll=new ScrollView(this);scroll.addView(l);setContentView(scroll);
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission("android.permission.POST_NOTIFICATIONS")!=android.content.pm.PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"},3);
+    }
+    private String currentEpoch(){try{return new org.json.JSONObject(LinkService.callInfo).optString("epoch");}catch(Exception e){return "";}}
+    private void callAction(String op,String number,String epoch){
+        if(epoch.isEmpty()||LinkService.callBusy||!LinkService.active)return;
+        startService(new Intent(this,LinkService.class).setAction("CALL_CONTROL").putExtra("op",op).putExtra("number",number).putExtra("epoch",epoch));
+    }
+    private void renderCall(){
+        try{
+            org.json.JSONObject j=new org.json.JSONObject(LinkService.callInfo);
+            int state=j.optInt("state",-1);
+            callStatus.setText(state==0?"Idle":state==1?"Incoming call":state==2?"Call active / dialing":"Call status unavailable");
+            dialButton.setEnabled(j.optBoolean("dial")&&!LinkService.callBusy);
+            answerButton.setEnabled(j.optBoolean("answer")&&!LinkService.callBusy);
+            endButton.setEnabled(j.optBoolean("end")&&!LinkService.callBusy);
+            callOutcome.setText(LinkService.callResult);
+        }catch(Exception e){dialButton.setEnabled(false);answerButton.setEnabled(false);endButton.setEnabled(false);}
     }
     private String lastInbox="";
     private void renderMessages(){
