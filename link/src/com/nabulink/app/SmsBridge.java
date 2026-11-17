@@ -63,16 +63,32 @@ final class SmsBridge {
         synchronized(this){inbox.clear();results.clear();}
     }
     synchronized void clearMessages(){inbox.clear();}
+    private boolean historyAllowed(){return enabled()&&context.getSharedPreferences("link",0).getBoolean("sms_history_enabled",false)&&allowed(Manifest.permission.READ_SMS);}
+    synchronized JSONObject history()throws Exception{
+        if(!historyAllowed())return reply("history_permission_denied");
+        JSONArray list=new JSONArray();
+        String[] columns={"_id","address","body","date","type"};
+        try(android.database.Cursor cursor=context.getContentResolver().query(Telephony.Sms.CONTENT_URI,columns,"type IN (1,2)",null,"date DESC, _id DESC")){
+            if(cursor==null)return reply("history_unavailable");
+            while(list.length()<8&&cursor.moveToNext()){
+                String address=cursor.getString(1),body=cursor.getString(2);
+                if(address==null)address="";if(body==null)body="";
+                list.put(new JSONObject().put("from",address.substring(0,Math.min(100,address.length()))).put("text",body.substring(0,Math.min(400,body.length()))).put("truncated",body.length()>400).put("time",cursor.getLong(3)).put("direction",cursor.getInt(4)==2?"sent":"received"));
+            }
+        }catch(SecurityException e){return reply("history_permission_denied");}catch(RuntimeException e){return reply("history_unavailable");}
+        return new JSONObject().put("state","ok").put("messages",list);
+    }
     synchronized JSONObject status()throws JSONException{
         JSONArray messages=new JSONArray();
         if(enabled()&&allowed(Manifest.permission.RECEIVE_SMS)){
             int count=0;Iterator<JSONObject> it=inbox.descendingIterator();
             while(it.hasNext()&&count++<3)messages.put(it.next());
         }
-        return new JSONObject().put("sendAllowed",enabled()&&allowed(Manifest.permission.SEND_SMS)).put("receiveAllowed",enabled()&&allowed(Manifest.permission.RECEIVE_SMS)).put("messages",messages);
+        return new JSONObject().put("sendAllowed",enabled()&&allowed(Manifest.permission.SEND_SMS)).put("receiveAllowed",enabled()&&allowed(Manifest.permission.RECEIVE_SMS)).put("historyAllowed",historyAllowed()).put("messages",messages);
     }
     synchronized JSONObject execute(JSONObject req)throws Exception{
         String op=req.optString("op"),id=req.optString("id");
+        if("sms_history".equals(op))return history();
         if(!id.matches("[0-9a-fA-F-]{36}"))return reply("invalid_id");
         if(!enabled()||!allowed(Manifest.permission.SEND_SMS))return reply("permission_denied");
         JSONObject previous=results.get(id);
