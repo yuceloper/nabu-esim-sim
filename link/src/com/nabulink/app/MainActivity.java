@@ -15,6 +15,8 @@ public class MainActivity extends Activity {
     private TextView status,details,host,scanStatus;
     private LinearLayout devices;
     private Button approve,reject;
+    private TextView smsResult,smsMessages;
+    private Button sendButton;
     private NsdManager.DiscoveryListener discovery;
     private boolean resolving, auto, visible;
     private final ArrayDeque<NsdServiceInfo> queue=new ArrayDeque<>();
@@ -24,6 +26,7 @@ public class MainActivity extends Activity {
         String v=LinkService.verification;
         approve.setVisibility(v.isEmpty()?8:0);reject.setVisibility(v.isEmpty()?8:0);
         approve.setText("Codes match — "+v);
+        smsResult.setText(LinkService.smsState);sendButton.setEnabled(LinkService.smsAllowed&&!LinkService.smsBusy);renderMessages();
         handler.postDelayed(this,300);
     }};
     private TextView text(LinearLayout l,String s,int size,int color){
@@ -33,7 +36,7 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle state){
         super.onCreate(state);getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         LinearLayout l=new LinearLayout(this);l.setOrientation(1);int p=(int)(24*getResources().getDisplayMetrics().density);l.setPadding(p,p,p,p);l.setBackgroundColor(0xff101722);
-        text(l,"Nabu Link",32,Color.WHITE);text(l,"DIRECT MODE / 0.5",13,0xff8ebdf3);
+        text(l,"Nabu Link",32,Color.WHITE);text(l,"SMS BRIDGE / 0.6",13,0xff8ebdf3);
         status=text(l,"Disconnected",24,0xff73dba7);details=text(l,"",17,0xffcfdeef);host=text(l,"",16,0xffcfdeef);
         approve=button(l,"Codes match",()->action("APPROVE",null));reject=button(l,"Reject pairing",()->action("REJECT",null));approve.setVisibility(8);reject.setVisibility(8);
         button(l,"Start phone host",()->{stopScan();remember("host");action("HOST",null);});
@@ -45,9 +48,24 @@ public class MainActivity extends Activity {
         scanStatus=text(l,"",14,0xff8ebdf3);devices=new LinearLayout(this);devices.setOrientation(1);l.addView(devices);
         button(l,"Disconnect / stop host",()->{stopScan();remember("");stopService(new Intent(this,LinkService.class));});
         button(l,"Forget paired device",()->new AlertDialog.Builder(this).setTitle("Forget pairing?").setMessage("The other device must also forget the old pairing.").setNegativeButton("Cancel",null).setPositiveButton("Forget",(d,w)->{stopScan();remember("");stopService(new Intent(this,LinkService.class));Pairing.forget(this);}).show());
+        text(l,"SMS Bridge",24,Color.WHITE);
+        button(l,"Enable SMS sharing on phone",()->new AlertDialog.Builder(this).setTitle("Share SMS with paired tablet?").setMessage("New incoming SMS, including potentially sensitive messages, will be visible on the paired tablet. Sending may incur carrier charges.").setNegativeButton("Cancel",null).setPositiveButton("Enable",(d,w)->{getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_enabled",true).apply();requestPermissions(new String[]{"android.permission.SEND_SMS","android.permission.RECEIVE_SMS"},7);}).show());
+        button(l,"Disable SMS sharing",()->getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_enabled",false).apply());
+        EditText recipient=new EditText(this);recipient.setHint("Recipient number");recipient.setInputType(android.text.InputType.TYPE_CLASS_PHONE);recipient.setTextColor(Color.WHITE);recipient.setHintTextColor(0xffa0adbd);l.addView(recipient);
+        EditText message=new EditText(this);message.setHint("SMS body");message.setTextColor(Color.WHITE);message.setHintTextColor(0xffa0adbd);message.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(320)});l.addView(message);
+        sendButton=button(l,"Send SMS via phone",()->{String to=recipient.getText().toString().replace(" ","").trim(),body=message.getText().toString();if(!to.matches("\\+?[0-9]{7,15}")||body.trim().isEmpty()){Toast.makeText(this,"Enter a valid number and message",0).show();return;}new AlertDialog.Builder(this).setTitle("Send SMS to "+to+"?").setMessage(body+"\n\nCarrier charges may apply.").setNegativeButton("Cancel",null).setPositiveButton("Send",(d,w)->{if(!LinkService.smsAllowed||LinkService.smsBusy)return;startService(new Intent(this,LinkService.class).setAction("SMS_SEND").putExtra("to",to).putExtra("text",body));}).show();});
+        sendButton.setEnabled(false);smsResult=text(l,"",15,0xff8ebdf3);text(l,"New incoming SMS",18,Color.WHITE);smsMessages=text(l,"No messages",16,0xffcfdeef);
         text(l,"Local Wi-Fi or phone hotspot • Saved pairing follows network changes. Compare codes only for first pairing.",13,0xffa0adbd);
         ScrollView scroll=new ScrollView(this);scroll.addView(l);setContentView(scroll);
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission("android.permission.POST_NOTIFICATIONS")!=android.content.pm.PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"},3);
+    }
+    private String lastInbox="";
+    private void renderMessages(){
+        String raw=LinkService.smsInbox;if(raw.equals(lastInbox))return;lastInbox=raw;
+        try{org.json.JSONArray a=new org.json.JSONArray(raw);StringBuilder s=new StringBuilder();
+            for(int i=0;i<a.length();i++){org.json.JSONObject m=a.getJSONObject(i);s.append(m.optString("from")).append(" • ").append(java.text.DateFormat.getDateTimeInstance().format(new Date(m.optLong("time")))).append("\n").append(m.optString("text")).append("\n\n");}
+            smsMessages.setText(s.length()==0?"No messages":s.toString());
+        }catch(Exception e){smsMessages.setText("Unable to read messages");}
     }
     private void remember(String role){getSharedPreferences("link",MODE_PRIVATE).edit().putString("role",role).apply();}
     private void action(String a,String ip){Intent i=new Intent(this,LinkService.class).setAction(a);if(ip!=null)i.putExtra("ip",ip);
