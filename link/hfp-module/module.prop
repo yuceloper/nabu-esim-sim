@@ -1,0 +1,6 @@
+id=nabulink_hfp
+name=Nabu Link HFP Client (Experimental)
+version=0.1
+versionCode=1
+author=Nabu Link
+description=Experimental Nabu Android 13 HF role only; hardware routing unverified.
