@@ -20,7 +20,8 @@ public class MainActivity extends Activity {
     private TextView callStatus,callOutcome;
     private EditText dialNumber,recipient,message;
     private View callSection,smsSection;
-    private TextView audioStatus;
+    private TextView audioStatus,historyText;
+    private Button historyButton;
     private NsdManager.DiscoveryListener discovery;
     private boolean resolving, auto, visible;
     private final ArrayDeque<NsdServiceInfo> queue=new ArrayDeque<>();
@@ -30,7 +31,7 @@ public class MainActivity extends Activity {
         String v=LinkService.verification;
         approve.setVisibility(v.isEmpty()?8:0);reject.setVisibility(v.isEmpty()?8:0);
         approve.setText("Codes match — "+v);
-        smsResult.setText(LinkService.smsState);sendButton.setEnabled(LinkService.smsAllowed&&!LinkService.smsBusy);renderMessages();renderCall();
+        smsResult.setText(LinkService.smsState);sendButton.setEnabled(LinkService.smsAllowed&&!LinkService.smsBusy);renderMessages();renderCall();historyButton.setEnabled(LinkService.historyAllowed&&!LinkService.historyBusy);historyText.setText(LinkService.historyResult+"\n"+LinkService.historyView);
         handler.postDelayed(this,300);
     }};
     private TextView text(LinearLayout l,String s,int size,int color){
@@ -68,7 +69,7 @@ public class MainActivity extends Activity {
         endButton=button(callPanel,"Decline / end call",()->callAction("call_end",null,currentEpoch()));
         dialButton.setEnabled(false);answerButton.setEnabled(false);endButton.setEnabled(false);
         callOutcome=text(callPanel,"",14,0xff8ebdf3);
-        text(callPanel,"Call audio remains on Redmi Note 8.",13,0xffa0adbd);
+        text(callPanel,"Audio stays on phone unless a working Bluetooth call route is established.",13,0xffa0adbd);
         audioStatus=text(callPanel,"Call audio: phone (tablet audio not verified)",14,0xffa0adbd);
         button(callPanel,"Enable phone Bluetooth route monitor",()->{if(Build.VERSION.SDK_INT>=31&&checkSelfPermission("android.permission.BLUETOOTH_CONNECT")!=android.content.pm.PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{"android.permission.BLUETOOTH_CONNECT"},9);else if(LinkService.active)startService(new Intent(this,LinkService.class).setAction("AUDIO_REFRESH"));});
         button(callPanel,"Bluetooth audio settings",()->startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)));
@@ -80,6 +81,11 @@ public class MainActivity extends Activity {
         message=new EditText(this);message.setHint("SMS body");message.setTextColor(Color.WHITE);message.setHintTextColor(0xffa0adbd);message.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(320)});smsPanel.addView(message);
         sendButton=button(smsPanel,"Send SMS via phone",()->{String to=recipient.getText().toString().replace(" ","").trim(),body=message.getText().toString();if(!to.matches("\\+?[0-9]{7,15}")||body.trim().isEmpty()){Toast.makeText(this,"Enter a valid number and message",0).show();return;}new AlertDialog.Builder(this).setTitle("Send SMS to "+to+"?").setMessage(body+"\n\nCarrier charges may apply.").setNegativeButton("Cancel",null).setPositiveButton("Send",(d,w)->{if(!LinkService.smsAllowed||LinkService.smsBusy)return;startService(new Intent(this,LinkService.class).setAction("SMS_SEND").putExtra("to",to).putExtra("text",body));}).show();});
         sendButton.setEnabled(false);smsResult=text(smsPanel,"",15,0xff8ebdf3);text(smsPanel,"New incoming SMS",18,Color.WHITE);smsMessages=text(smsPanel,"No messages",16,0xffcfdeef);
+        button(smsPanel,"Enable recent SMS history on phone",()->new AlertDialog.Builder(this).setTitle("Share recent SMS history?").setMessage("This separately authorizes the paired tablet to request up to eight recent sent and received SMS. Requires SMS sharing and read permission.").setNegativeButton("Cancel",null).setPositiveButton("Enable",(d,w)->{getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_history_enabled",true).apply();requestPermissions(new String[]{"android.permission.READ_SMS"},10);}).show());
+        button(smsPanel,"Disable SMS history",()->getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_history_enabled",false).apply());
+        historyButton=button(smsPanel,"Load recent phone SMS",()->{if(LinkService.active&&LinkService.historyAllowed)startService(new Intent(this,LinkService.class).setAction("SMS_HISTORY"));});historyButton.setEnabled(false);
+        button(smsPanel,"Clear history view",()->{if(LinkService.active)startService(new Intent(this,LinkService.class).setAction("SMS_HISTORY_CLEAR"));});
+        historyText=text(smsPanel,"",15,0xffcfdeef);
         text(l,"Local Wi-Fi or phone hotspot • Saved pairing follows network changes. Compare codes only for first pairing.",13,0xffa0adbd);
         ScrollView scroll=new ScrollView(this);scroll.addView(l);setContentView(scroll);
         handleComposeIntent(getIntent());
