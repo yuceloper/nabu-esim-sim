@@ -40,6 +40,10 @@ public class LinkService extends Service {
     private volatile String token;
     private boolean watching;
     private SmsBridge sms;
+    private CallBridge calls;
+    public static volatile String callInfo="{}",callResult="";
+    public static volatile boolean callBusy;
+    private String ringingEpoch="";
     public static volatile String smsState="";
     public static volatile String smsInbox="[]";
     public static volatile boolean smsAllowed;
@@ -109,7 +113,8 @@ public class LinkService extends Service {
     private void runOnUiThread(Runnable r){handler.post(r);}
     @Override public void onCreate(){
         super.onCreate();
-        sms=new SmsBridge(this);
+        sms=new SmsBridge(this);calls=new CallBridge(this);
+        getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("nabu_calls","Nabu Link calls",NotificationManager.IMPORTANCE_HIGH));
         getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("nabu_sms","Nabu Link messages",NotificationManager.IMPORTANCE_DEFAULT));
         getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel(CHANNEL,"Nabu Link connection",NotificationManager.IMPORTANCE_LOW));
     }
@@ -117,6 +122,7 @@ public class LinkService extends Service {
     @Override public int onStartCommand(Intent i,int flags,int id){
         if(i==null||"STOP".equals(i.getAction())){stopSelf();return START_NOT_STICKY;}
         String action=i.getAction();
+        if("CALL_CONTROL".equals(action)){sendCall(i.getStringExtra("op"),i.getStringExtra("number"),i.getStringExtra("epoch"));return START_NOT_STICKY;}
         if("SMS_SEND".equals(action)){sendSms(i.getStringExtra("to"),i.getStringExtra("text"));return START_NOT_STICKY;}
         if("APPROVE".equals(action)||"REJECT".equals(action)){
             CountDownLatch l=approval;if(l!=null){approved="APPROVE".equals(action);l.countDown();}return START_NOT_STICKY;
@@ -175,7 +181,7 @@ public class LinkService extends Service {
     }
     private JSONObject snapshot()throws Exception{
         TelephonyManager tm=getSystemService(TelephonyManager.class);
-        JSONObject j=new JSONObject();j.put("protocol",PROTOCOL);j.put("model",android.os.Build.MODEL);j.put("network",localNetwork());j.put("sms",sms.status());
+        JSONObject j=new JSONObject();j.put("protocol",PROTOCOL);j.put("model",android.os.Build.MODEL);j.put("network",localNetwork());j.put("sms",sms.status());j.put("call",calls.status());
         j.put("operator",tm==null?"":tm.getNetworkOperatorName());j.put("simState",tm==null?-1:tm.getSimState());
         j.put("voiceCapable",tm!=null&&tm.isVoiceCapable());j.put("smsCapable",tm!=null&&tm.isSmsCapable());
         try{android.telephony.SignalStrength sig=tm==null?null:tm.getSignalStrength();j.put("signalLevel",sig==null?-1:sig.getLevel());}catch(RuntimeException e){j.put("signalLevel",-1);}
@@ -203,7 +209,7 @@ public class LinkService extends Service {
                                 if(!running||!session.equals(token))continue;
                                 Pairing.save(this,"host",secret);
                                 sms.clearMessages();
-                                getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_enabled",false).apply();
+                                getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_enabled",false).putBoolean("calls_enabled",false).apply();
                                 runOnUiThread(()->{if(running&&session.equals(token))show("Phone host active","Tablet paired");});
                             }catch(Exception e){runOnUiThread(()->{if(running&&session.equals(token))show("Phone host active","Pairing rejected or timed out");});}
                             finally{pairingSocket=null;}
@@ -217,7 +223,7 @@ public class LinkService extends Service {
                         if(!running||!session.equals(token))continue;
                         JSONObject response;
                         if(req.length==1&&req[0]==1)response=snapshot();
-                        else response=sms.execute(new JSONObject(new String(req,"UTF-8")));
+                        else {JSONObject command=new JSONObject(new String(req,"UTF-8"));response=command.optString("op").startsWith("call_")?calls.execute(command):sms.execute(command);}
                         send(out,secret,aad((byte)2,client,host),response.toString().getBytes("UTF-8"));
                     }catch(Exception e){if(server.isClosed())break;}
                 }
@@ -226,7 +232,7 @@ public class LinkService extends Service {
         },"link-host").start();
     }
     private synchronized void stopHost(){if(sms!=null)sms.stop();running=false;hostMode=false;pairUntil=0;cancelPair();unadvertise();token=null;hostInfo="";try{if(listener!=null)listener.close();}catch(IOException ignored){}listener=null;}
-    private void disconnect(){smsAllowed=false;smsInbox="[]";smsBusy=false;smsState="";pendingId="";notifiedId="";stopClientDiscovery();connectedIp="";cancelPair();pairingClient=false;watching=false;generation.incrementAndGet();handler.removeCallbacksAndMessages(null);show("Disconnected","");}
+    private void disconnect(){callInfo="{}";callResult="";callBusy=false;ringingEpoch="";try{getSystemService(NotificationManager.class).cancel(33);}catch(RuntimeException ignored){}smsAllowed=false;smsInbox="[]";smsBusy=false;smsState="";pendingId="";notifiedId="";stopClientDiscovery();connectedIp="";cancelPair();pairingClient=false;watching=false;generation.incrementAndGet();handler.removeCallbacksAndMessages(null);show("Disconnected","");}
     private void stopClientDiscovery(){
         NsdManager.DiscoveryListener l=clientDiscovery;clientDiscovery=null;resolveQueue.clear();seenServices.clear();discovered.clear();
         if(l!=null)try{getSystemService(NsdManager.class).stopServiceDiscovery(l);}catch(RuntimeException ignored){}
@@ -305,7 +311,7 @@ public class LinkService extends Service {
         if(failures>0||connectedIp.isEmpty()){if(!gateway.isEmpty())candidates.add(gateway);candidates.addAll(discovered);}
         if(!connectedIp.isEmpty())candidates.add(connectedIp);
         new Thread(()->{
-            String heading="Connection unavailable",description="Searching for saved phone...";String found="";JSONObject smsData=null;
+            String heading="Connection unavailable",description="Searching for saved phone...";String found="";JSONObject smsData=null,callData=null;
             for(String ip:candidates){
                 if(destroyed||generation.get()!=g)return;
                 try{
@@ -315,16 +321,51 @@ public class LinkService extends Service {
                     description="Connected / encrypted"+(ip.equals(gateway)?" / Direct gateway":" / Local network")+"\nRemote modem: "+j.optString("model")+"\nSIM: "+(j.optInt("simState")==5?"READY":"State "+j.optInt("simState"))+
                         "\nSignal: "+(signal>=0&&signal<=4?signal+" / 4":"Unavailable")+"\nVoice: "+j.optBoolean("voiceCapable")+"\nSMS: "+j.optBoolean("smsCapable")+
                         "\nPhone network: "+j.optString("network","Unknown")+"\nTablet network: "+localNetwork()+"\nUpdated: "+java.text.DateFormat.getTimeInstance().format(new Date());
-                    smsData=j.optJSONObject("sms");found=ip;break;
+                    smsData=j.optJSONObject("sms");callData=j.optJSONObject("call");found=ip;break;
                 }catch(Exception ignored){}
             }
-            final String a=heading,b=description,successIp=found;final JSONObject remoteSms=smsData;
+            final String a=heading,b=description,successIp=found;final JSONObject remoteSms=smsData,remoteCall=callData;
             runOnUiThread(()->{if(destroyed||!watching||generation.get()!=g)return;show(a,b);
-                if(!successIp.isEmpty()){updateSms(remoteSms);connectedIp=successIp;failures=0;stopClientDiscovery();getSharedPreferences("link",MODE_PRIVATE).edit().putString("last_ip",successIp).apply();}
-                else {failures++;smsAllowed=false;}
+                if(!successIp.isEmpty()){updateSms(remoteSms);updateCall(remoteCall);connectedIp=successIp;failures=0;stopClientDiscovery();getSharedPreferences("link",MODE_PRIVATE).edit().putString("last_ip",successIp).apply();}
+                else {failures++;smsAllowed=false;updateCall(null);}
                 handler.postDelayed(()->poll(secret,g),successIp.isEmpty()?3000:3000);
             });
         },"link-client").start();
+    }
+    private void updateCall(JSONObject data){
+        callInfo=data==null?"{}":data.toString();
+        NotificationManager nm=getSystemService(NotificationManager.class);
+        if(data==null||data.optInt("state",-1)!=1){nm.cancel(33);return;}
+        String epoch=data.optString("epoch");
+        if(epoch.isEmpty()||epoch.equals(ringingEpoch))return;
+        ringingEpoch=epoch;
+        PendingIntent open=PendingIntent.getActivity(this,24,new Intent(this,MainActivity.class),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
+        Notification n=new Notification.Builder(this,"nabu_calls").setSmallIcon(android.R.drawable.sym_call_incoming)
+            .setContentTitle("Nabu Link").setContentText("Incoming call on paired phone").setContentIntent(open)
+            .setCategory(Notification.CATEGORY_CALL).setVisibility(Notification.VISIBILITY_PRIVATE).setAutoCancel(true).build();
+        try{nm.notify(33,n);}catch(RuntimeException ignored){}
+    }
+    private void sendCall(String op,String number,String epoch){
+        if(!watching||callBusy||connectedIp.isEmpty()||op==null||epoch==null)return;
+        try{
+            JSONObject current=new JSONObject(callInfo);
+            if(!epoch.equals(current.optString("epoch"))){callResult="Call state changed";return;}
+            String permission="call_dial".equals(op)?"dial":"call_answer".equals(op)?"answer":"call_end".equals(op)?"end":"";
+            if(permission.isEmpty()||!current.optBoolean(permission)){callResult="Action unavailable";return;}
+        }catch(Exception e){return;}
+        String secret=Pairing.load(this,"client");if(secret==null)return;
+        final int g=generation.get();final String ip=connectedIp,id=UUID.randomUUID().toString();
+        callBusy=true;callResult="Requesting...";
+        new Thread(()->{
+            String result="Unknown — check phone before retrying";
+            try{
+                JSONObject req=new JSONObject().put("op",op).put("id",id).put("epoch",epoch);
+                if(number!=null)req.put("number",number);
+                result=exchange(ip,secret,4000,req.toString().getBytes("UTF-8")).optString("state","unknown");
+            }catch(Exception ignored){}
+            final String response=result;
+            runOnUiThread(()->{if(!destroyed&&generation.get()==g){callBusy=false;callResult=response;}});
+        },"link-call").start();
     }
     private void updateSms(JSONObject data){
         smsAllowed=data!=null&&data.optBoolean("sendAllowed");
