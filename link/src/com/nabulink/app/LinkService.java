@@ -3,6 +3,11 @@ package com.nabulink.app;
 import android.app.*;
 import android.content.Intent;
 import android.net.nsd.*;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.LinkProperties;
+import android.net.RouteInfo;
 import android.os.SystemClock;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -34,6 +39,13 @@ public class LinkService extends Service {
     private volatile boolean running, destroyed;
     private volatile String token;
     private boolean watching;
+    private volatile String connectedIp="";
+    private final LinkedHashSet<String> discovered=new LinkedHashSet<>();
+    private NsdManager.DiscoveryListener clientDiscovery;
+    private final ArrayDeque<NsdServiceInfo> resolveQueue=new ArrayDeque<>();
+    private boolean resolvingClient;
+    private final HashSet<String> seenServices=new HashSet<>();
+    private int failures;
     private volatile long pairUntil;
     public static volatile String verification="";
     private volatile CountDownLatch approval;
@@ -105,6 +117,7 @@ public class LinkService extends Service {
         if("HOST".equals(action)){stopHost();startHost();}
         else if("PAIR".equals(action)){startPair(i.getStringExtra("ip"));}
         else if("CLIENT".equals(action)){String secret=Pairing.load(this,"client");if(secret==null)startPair(i.getStringExtra("ip"));else connect(i.getStringExtra("ip"),secret);}
+        else if("AUTO".equals(action)){String secret=Pairing.load(this,"client");if(secret==null){show("Pair first","Find nearby phone to pair");stopSelf();}else connect(getSharedPreferences("link",MODE_PRIVATE).getString("last_ip",""),secret);}
         else stopSelf();
         return START_NOT_STICKY;
     }
@@ -152,7 +165,7 @@ public class LinkService extends Service {
     }
     private JSONObject snapshot()throws Exception{
         TelephonyManager tm=getSystemService(TelephonyManager.class);
-        JSONObject j=new JSONObject();j.put("protocol",PROTOCOL);j.put("model",android.os.Build.MODEL);
+        JSONObject j=new JSONObject();j.put("protocol",PROTOCOL);j.put("model",android.os.Build.MODEL);j.put("network",localNetwork());
         j.put("operator",tm==null?"":tm.getNetworkOperatorName());j.put("simState",tm==null?-1:tm.getSimState());
         j.put("voiceCapable",tm!=null&&tm.isVoiceCapable());j.put("smsCapable",tm!=null&&tm.isSmsCapable());
         try{android.telephony.SignalStrength sig=tm==null?null:tm.getSignalStrength();j.put("signalLevel",sig==null?-1:sig.getLevel());}catch(RuntimeException e){j.put("signalLevel",-1);}
@@ -199,36 +212,102 @@ public class LinkService extends Service {
         },"link-host").start();
     }
     private synchronized void stopHost(){running=false;hostMode=false;pairUntil=0;cancelPair();unadvertise();token=null;hostInfo="";try{if(listener!=null)listener.close();}catch(IOException ignored){}listener=null;}
-    private void disconnect(){cancelPair();pairingClient=false;watching=false;generation.incrementAndGet();handler.removeCallbacksAndMessages(null);show("Disconnected","");}
-    private void connect(String ip,String secret){
-        if(ip==null||secret==null){stopSelf();return;}
-        if(!ip.matches("[0-9.]{7,15}")||!secret.matches("[0-9a-f]{32}")){stopSelf();return;}
-        stopHost();disconnect();watching=true;int g=generation.get();show("Connecting","Authenticating phone...");
-        poll(ip,secret,g);
+    private void disconnect(){stopClientDiscovery();connectedIp="";cancelPair();pairingClient=false;watching=false;generation.incrementAndGet();handler.removeCallbacksAndMessages(null);show("Disconnected","");}
+    private void stopClientDiscovery(){
+        NsdManager.DiscoveryListener l=clientDiscovery;clientDiscovery=null;resolveQueue.clear();seenServices.clear();discovered.clear();
+        if(l!=null)try{getSystemService(NsdManager.class).stopServiceDiscovery(l);}catch(RuntimeException ignored){}
     }
-    private void poll(String ip,String secret,int g){
+    private void resolveClient(){
+        if(resolvingClient||clientDiscovery==null||resolveQueue.isEmpty())return;
+        NsdManager.DiscoveryListener current=clientDiscovery;
+        NsdServiceInfo next=resolveQueue.remove();resolvingClient=true;
+        try{getSystemService(NsdManager.class).resolveService(next,new NsdManager.ResolveListener(){
+            public void onResolveFailed(NsdServiceInfo n,int e){handler.post(()->{resolvingClient=false;resolveClient();});}
+            public void onServiceResolved(NsdServiceInfo n){handler.post(()->{
+                resolvingClient=false;
+                if(clientDiscovery==current&&n.getHost() instanceof Inet4Address&&n.getHost().isSiteLocalAddress()&&n.getPort()==PORT){
+                    if(discovered.size()<8)discovered.add(n.getHost().getHostAddress());
+                }resolveClient();
+            });}
+        });}catch(RuntimeException e){resolvingClient=false;resolveClient();}
+    }
+    private void discoverClient(int g){
+        if(clientDiscovery!=null)return;
+        NsdManager.DiscoveryListener l=new NsdManager.DiscoveryListener(){
+            public void onDiscoveryStarted(String t){}
+            public void onDiscoveryStopped(String t){}
+            public void onStartDiscoveryFailed(String t,int e){handler.post(()->{if(clientDiscovery==this)stopClientDiscovery();});}
+            public void onStopDiscoveryFailed(String t,int e){}
+            public void onServiceLost(NsdServiceInfo n){}
+            public void onServiceFound(NsdServiceInfo n){handler.post(()->{if(clientDiscovery==this&&seenServices.size()<16&&seenServices.add(n.getServiceName())){resolveQueue.add(n);resolveClient();}});}
+        };clientDiscovery=l;
+        try{getSystemService(NsdManager.class).discoverServices(TYPE,NsdManager.PROTOCOL_DNS_SD,l);}catch(RuntimeException e){stopClientDiscovery();}
+        handler.postDelayed(()->{if(generation.get()==g&&clientDiscovery==l)stopClientDiscovery();},20000);
+    }
+    private String wifiGateway(){
+        try{
+            ConnectivityManager cm=getSystemService(ConnectivityManager.class);
+            for(Network n:cm.getAllNetworks()){
+                NetworkCapabilities caps=cm.getNetworkCapabilities(n);
+                if(caps==null||!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))continue;
+                LinkProperties lp=cm.getLinkProperties(n);if(lp==null)continue;
+                for(RouteInfo route:lp.getRoutes())if(route.isDefaultRoute()&&route.getGateway() instanceof Inet4Address&&route.getGateway().isSiteLocalAddress())return route.getGateway().getHostAddress();
+            }
+        }catch(RuntimeException ignored){}
+        return "";
+    }
+    private String localNetwork(){
+        try{ConnectivityManager cm=getSystemService(ConnectivityManager.class);Network n=cm.getActiveNetwork();NetworkCapabilities caps=n==null?null:cm.getNetworkCapabilities(n);
+            if(caps==null)return "No default network";
+            return (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)?"Wi-Fi":caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)?"Cellular":"Other")+
+                (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)?" / internet validated":" / internet not validated");
+        }catch(RuntimeException e){return "Unavailable";}
+    }
+    private void connect(String ip,String secret){
+        if(secret==null||!secret.matches("[0-9a-f]{32}")){stopSelf();return;}
+        stopHost();disconnect();watching=true;failures=0;connectedIp=ip==null?"":ip;int g=generation.get();
+        show("Connecting","Authenticating saved phone...");poll(secret,g);
+    }
+    private JSONObject requestStatus(String ip,String secret,int timeout)throws Exception{
+        if(!ip.matches("[0-9.]{7,15}"))throw new IOException("Invalid address");
+        try(Socket s=new Socket()){
+            InetAddress target=InetAddress.getByName(ip);if(!target.isSiteLocalAddress())throw new IOException("Private LAN only");
+            s.connect(new InetSocketAddress(target,PORT),timeout);s.setSoTimeout(timeout);
+            DataOutputStream out=new DataOutputStream(s.getOutputStream());DataInputStream in=new DataInputStream(s.getInputStream());
+            byte[] client=randomBytes(16),host=new byte[16];
+            out.writeInt(PROTOCOL);out.write(client);out.flush();in.readFully(host);
+            send(out,secret,aad((byte)1,client,host),new byte[]{1});
+            JSONObject j=new JSONObject(new String(receive(in,secret,aad((byte)2,client,host)),"UTF-8"));
+            if(j.getInt("protocol")!=PROTOCOL)throw new IOException("Protocol mismatch");
+            return j;
+        }
+    }
+    private void poll(String secret,int g){
         if(!watching||destroyed||generation.get()!=g)return;
+        if(failures>0||connectedIp.isEmpty())discoverClient(g);
+        LinkedHashSet<String> candidates=new LinkedHashSet<>();
+        String gateway=wifiGateway();
+        if(failures>0||connectedIp.isEmpty()){if(!gateway.isEmpty())candidates.add(gateway);candidates.addAll(discovered);}
+        if(!connectedIp.isEmpty())candidates.add(connectedIp);
         new Thread(()->{
-            String title,body;boolean ok=false;
-            try(Socket s=new Socket()){
-                InetAddress target=InetAddress.getByName(ip);if(!target.isSiteLocalAddress())throw new IOException("Private LAN only");
-                s.connect(new InetSocketAddress(target,PORT),3500);s.setSoTimeout(3500);
-                DataOutputStream out=new DataOutputStream(s.getOutputStream());DataInputStream in=new DataInputStream(s.getInputStream());
-                byte[] client=randomBytes(16),host=new byte[16];
-                out.writeInt(PROTOCOL);out.write(client);out.flush();in.readFully(host);
-                send(out,secret,aad((byte)1,client,host),new byte[]{1});
-                JSONObject j=new JSONObject(new String(receive(in,secret,aad((byte)2,client,host)),"UTF-8"));
-                if(j.getInt("protocol")!=PROTOCOL)throw new IOException("Protocol mismatch");
-                int signal=j.optInt("signalLevel",-1);
-                title=j.optString("operator","");if(title.isEmpty())title="Operator unavailable";
-                body="Connected / encrypted\nRemote modem: "+j.optString("model")+"\nSIM: "+(j.optInt("simState")==5?"READY":"State "+j.optInt("simState"))+
-                    "\nSignal: "+(signal>=0&&signal<=4?signal+" / 4":"Unavailable")+"\nVoice: "+j.optBoolean("voiceCapable")+"\nSMS: "+j.optBoolean("smsCapable")+"\nUpdated: "+java.text.DateFormat.getTimeInstance().format(new Date());
-                ok=true;
-            }catch(Exception e){title="Connection unavailable";body="Check host, Wi-Fi and session code. Retrying...";}
-            final String a=title,b=body;final boolean success=ok;
+            String heading="Connection unavailable",description="Searching for saved phone...";String found="";
+            for(String ip:candidates){
+                if(destroyed||generation.get()!=g)return;
+                try{
+                    JSONObject j=requestStatus(ip,secret,2500);
+                    int signal=j.optInt("signalLevel",-1);
+                    heading=j.optString("operator","");if(heading.isEmpty())heading="Operator unavailable";
+                    description="Connected / encrypted"+(ip.equals(gateway)?" / Direct gateway":" / Local network")+"\nRemote modem: "+j.optString("model")+"\nSIM: "+(j.optInt("simState")==5?"READY":"State "+j.optInt("simState"))+
+                        "\nSignal: "+(signal>=0&&signal<=4?signal+" / 4":"Unavailable")+"\nVoice: "+j.optBoolean("voiceCapable")+"\nSMS: "+j.optBoolean("smsCapable")+
+                        "\nPhone network: "+j.optString("network","Unknown")+"\nTablet network: "+localNetwork()+"\nUpdated: "+java.text.DateFormat.getTimeInstance().format(new Date());
+                    found=ip;break;
+                }catch(Exception ignored){}
+            }
+            final String a=heading,b=description,successIp=found;
             runOnUiThread(()->{if(destroyed||!watching||generation.get()!=g)return;show(a,b);
-                if(success)getSharedPreferences("link",MODE_PRIVATE).edit().putString("last_ip",ip).apply();
-                handler.postDelayed(()->poll(ip,secret,g),success?3000:5000);
+                if(!successIp.isEmpty()){connectedIp=successIp;failures=0;stopClientDiscovery();getSharedPreferences("link",MODE_PRIVATE).edit().putString("last_ip",successIp).apply();}
+                else failures++;
+                handler.postDelayed(()->poll(secret,g),successIp.isEmpty()?3000:3000);
             });
         },"link-client").start();
     }
