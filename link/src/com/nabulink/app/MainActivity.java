@@ -33,17 +33,19 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle state){
         super.onCreate(state);getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         LinearLayout l=new LinearLayout(this);l.setOrientation(1);int p=(int)(24*getResources().getDisplayMetrics().density);l.setPadding(p,p,p,p);l.setBackgroundColor(0xff101722);
-        text(l,"Nabu Link",32,Color.WHITE);text(l,"AUTOMATIC PAIRING / 0.4",13,0xff8ebdf3);
+        text(l,"Nabu Link",32,Color.WHITE);text(l,"DIRECT MODE / 0.5",13,0xff8ebdf3);
         status=text(l,"Disconnected",24,0xff73dba7);details=text(l,"",17,0xffcfdeef);host=text(l,"",16,0xffcfdeef);
         approve=button(l,"Codes match",()->action("APPROVE",null));reject=button(l,"Reject pairing",()->action("REJECT",null));approve.setVisibility(8);reject.setVisibility(8);
         button(l,"Start phone host",()->{stopScan();remember("host");action("HOST",null);});
         button(l,"Allow new pairing (60 seconds)",()->{if(LinkService.active&&!LinkService.hostInfo.isEmpty())action("ALLOW",null);else Toast.makeText(this,"Start phone host first",0).show();});
         button(l,"Find nearby phone",()->{remember("client");scan(false);});
-        button(l,"Reconnect saved phone",()->{remember("client");scan(true);});
+        button(l,"Reconnect saved phone",()->{stopScan();remember("client");if(Pairing.load(this,"client")!=null)action("AUTO",null);else scan(false);});
+        button(l,"Open hotspot settings (phone)",()->{try{startActivity(new Intent("android.settings.TETHER_SETTINGS"));}catch(Exception e){startActivity(new Intent(android.provider.Settings.ACTION_WIRELESS_SETTINGS));}});
+        button(l,"Open Wi-Fi settings (tablet)",()->startActivity(new Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)));
         scanStatus=text(l,"",14,0xff8ebdf3);devices=new LinearLayout(this);devices.setOrientation(1);l.addView(devices);
         button(l,"Disconnect / stop host",()->{stopScan();remember("");stopService(new Intent(this,LinkService.class));});
         button(l,"Forget paired device",()->new AlertDialog.Builder(this).setTitle("Forget pairing?").setMessage("The other device must also forget the old pairing.").setNegativeButton("Cancel",null).setPositiveButton("Forget",(d,w)->{stopScan();remember("");stopService(new Intent(this,LinkService.class));Pairing.forget(this);}).show());
-        text(l,"Same Wi-Fi • Compare the six-digit code on both screens. Never approve a mismatch.",13,0xffa0adbd);
+        text(l,"Local Wi-Fi or phone hotspot • Saved pairing follows network changes. Compare codes only for first pairing.",13,0xffa0adbd);
         ScrollView scroll=new ScrollView(this);scroll.addView(l);setContentView(scroll);
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission("android.permission.POST_NOTIFICATIONS")!=android.content.pm.PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"},3);
     }
@@ -83,7 +85,7 @@ public class MainActivity extends Activity {
     private void stopScan(){NsdManager.DiscoveryListener l=discovery;discovery=null;queue.clear();if(l!=null)try{getSystemService(NsdManager.class).stopServiceDiscovery(l);}catch(RuntimeException ignored){}}
     @Override protected void onStart(){super.onStart();visible=true;handler.post(refresh);
         if(!LinkService.active){String role=getSharedPreferences("link",MODE_PRIVATE).getString("role","");
-            if("host".equals(role))action("HOST",null);else if("client".equals(role)&&Pairing.load(this,"client")!=null)scan(true);}
+            if("host".equals(role))action("HOST",null);else if("client".equals(role)&&Pairing.load(this,"client")!=null)action("AUTO",null);}
     }
     @Override protected void onStop(){visible=false;stopScan();handler.removeCallbacks(refresh);super.onStop();}
 }
