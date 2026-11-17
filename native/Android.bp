@@ -1,0 +1,8 @@
+cc_binary {
+    name: "nabu-vsim-probe",
+    srcs: ["main.cpp"],
+    vendor: true,
+    compile_multilib: "32",
+    shared_libs: ["libhidlbase", "libutils"],
+    cflags: ["-Wall", "-Wextra"],
+}
