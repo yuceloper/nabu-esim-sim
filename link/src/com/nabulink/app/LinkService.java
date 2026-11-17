@@ -85,7 +85,7 @@ public class LinkService extends Service {
     }
     private byte[] receive(DataInputStream in,String secret,byte[] context)throws Exception{
         byte[] iv=new byte[12];in.readFully(iv);int n=in.readInt();
-        if(n<16||n>8192)throw new IOException("Invalid frame");
+        if(n<16||n>32768)throw new IOException("Invalid frame");
         byte[] enc=new byte[n];in.readFully(enc);return crypt(Cipher.DECRYPT_MODE,secret,iv,context,enc);
     }
     private void show(String s,String d){
@@ -202,6 +202,8 @@ public class LinkService extends Service {
                                 String secret=Pairing.exchange(in,out,true,this::confirm);
                                 if(!running||!session.equals(token))continue;
                                 Pairing.save(this,"host",secret);
+                                sms.clearMessages();
+                                getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_enabled",false).apply();
                                 runOnUiThread(()->{if(running&&session.equals(token))show("Phone host active","Tablet paired");});
                             }catch(Exception e){runOnUiThread(()->{if(running&&session.equals(token))show("Phone host active","Pairing rejected or timed out");});}
                             finally{pairingSocket=null;}
