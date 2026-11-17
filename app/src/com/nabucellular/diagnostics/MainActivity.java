@@ -5,6 +5,7 @@ import android.os.Bundle;
 import android.os.Build;
 import android.content.pm.PackageManager;
 import android.telephony.euicc.EuiccManager;
+import android.telephony.TelephonyManager;
 import android.se.omapi.SEService;
 import android.se.omapi.Reader;
 import android.graphics.Color;
@@ -41,7 +42,7 @@ public class MainActivity extends Activity {
         layout.addView(result);
         scroll.addView(layout);
         setContentView(scroll);
-        line("Developer diagnostics • v0.1");
+        line("Developer diagnostics • v0.2");
         line("Android " + Build.VERSION.RELEASE + " / API " + Build.VERSION.SDK_INT);
         PackageManager pm = getPackageManager();
         for (String feature : new String[]{"android.hardware.telephony","android.hardware.telephony.euicc","android.hardware.telephony.ims","android.hardware.se.omapi.ese","android.hardware.se.omapi.uicc"}) {
@@ -58,6 +59,28 @@ public class MainActivity extends Activity {
             line("EuiccManager: " + (manager == null ? "unavailable" : "enabled=" + manager.isEnabled()));
         } catch (RuntimeException e) {
             line("EuiccManager: " + e.getClass().getSimpleName());
+        }
+        TelephonyManager tm = getSystemService(TelephonyManager.class);
+        if (tm == null) {
+            line("TelephonyManager: unavailable");
+        } else {
+            try {
+                int active = Build.VERSION.SDK_INT >= 30 ? tm.getActiveModemCount() : tm.getPhoneCount();
+                line("Active modem count: " + active);
+                if (Build.VERSION.SDK_INT >= 30) line("Supported modem count: " + tm.getSupportedModemCount());
+                for (int i = 0; i < Math.min(active, 4); i++) {
+                    line("Logical slot " + i + " SIM state (Android enum): " + tm.getSimState(i));
+                }
+            } catch (RuntimeException e) {
+                line("Modem/slot query: " + e.getClass().getSimpleName());
+            }
+            try {
+                line("Voice capable: " + tm.isVoiceCapable());
+                line("SMS capable: " + tm.isSmsCapable());
+                line("Data capable: " + tm.isDataCapable());
+            } catch (RuntimeException e) {
+                line("Capability query: " + e.getClass().getSimpleName());
+            }
         }
         line("OMAPI: connecting...");
         try {
