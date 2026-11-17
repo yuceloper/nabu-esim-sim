@@ -11,6 +11,7 @@ platform="$sdk/platforms/android-33/android.jar"
 [[ -f "$platform" ]] || { echo "Install Android SDK Platform 33" >&2; exit 1; }
 out=build/link-apk
 mkdir -p "$out"
+rm -f "$out/nabu-link.apk" "$out/unsigned.apk" "$out/aligned.apk"
 rm -rf "$out/classes" "$out/dex"
 mkdir -p "$out/classes" "$out/dex"
 javac --release 8 -classpath "$platform" -d "$out/classes" link/src/com/nabulink/app/*.java
@@ -22,6 +23,7 @@ key="$out/local-debug.keystore"
 if [[ ! -f "$key" ]]; then
   keytool -genkeypair -keystore "$key" -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Nabu Link Local Debug" >/dev/null
 fi
-"$bt/apksigner" sign --ks "$key" --ks-pass pass:android --key-pass pass:android --out "$out/nabu-link.apk" "$out/aligned.apk"
-"$bt/apksigner" verify "$out/nabu-link.apk"
+"$bt/apksigner" sign --ks "$key" --ks-pass pass:android --key-pass pass:android --out "$out/signed-pending.apk" "$out/aligned.apk"
+"$bt/apksigner" verify "$out/signed-pending.apk"
+mv -f "$out/signed-pending.apk" "$out/nabu-link.apk"
 echo "APK: $out/nabu-link.apk"
