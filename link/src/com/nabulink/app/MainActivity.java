@@ -70,6 +70,7 @@ public class MainActivity extends Activity {
         callOutcome=text(callPanel,"",14,0xff8ebdf3);
         text(callPanel,"Call audio remains on Redmi Note 8.",13,0xffa0adbd);
         audioStatus=text(callPanel,"Call audio: phone (tablet audio not verified)",14,0xffa0adbd);
+        button(callPanel,"Enable phone Bluetooth route monitor",()->{if(Build.VERSION.SDK_INT>=31&&checkSelfPermission("android.permission.BLUETOOTH_CONNECT")!=android.content.pm.PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{"android.permission.BLUETOOTH_CONNECT"},9);else if(LinkService.active)startService(new Intent(this,LinkService.class).setAction("AUDIO_REFRESH"));});
         button(callPanel,"Bluetooth audio settings",()->startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)));
         LinearLayout smsPanel=new LinearLayout(this);smsPanel.setOrientation(1);l.addView(smsPanel);smsSection=smsPanel;
         text(smsPanel,"SMS Bridge",24,Color.WHITE);
@@ -101,6 +102,10 @@ public class MainActivity extends Activity {
             Toast.makeText(this,"Draft prepared. Confirm Send SMS via phone to send.",Toast.LENGTH_LONG).show();
         }
     }
+    @Override public void onRequestPermissionsResult(int requestCode,String[] permissions,int[] results){
+        super.onRequestPermissionsResult(requestCode,permissions,results);
+        if(requestCode==9&&results.length>0&&results[0]==android.content.pm.PackageManager.PERMISSION_GRANTED&&LinkService.active)startService(new Intent(this,LinkService.class).setAction("AUDIO_REFRESH"));
+    }
     private String currentEpoch(){try{return new org.json.JSONObject(LinkService.callInfo).optString("epoch");}catch(Exception e){return "";}}
     private void callAction(String op,String number,String epoch){
         if(epoch.isEmpty()||LinkService.callBusy||!LinkService.active)return;
@@ -114,7 +119,7 @@ public class MainActivity extends Activity {
             dialButton.setEnabled(j.optBoolean("dial")&&!LinkService.callBusy);
             answerButton.setEnabled(j.optBoolean("answer")&&!LinkService.callBusy);
             endButton.setEnabled(j.optBoolean("end")&&!LinkService.callBusy);
-            callOutcome.setText(LinkService.callResult);
+            callOutcome.setText(LinkService.callResult);audioStatus.setText("Phone audio route: "+LinkService.remoteAudio);
         }catch(Exception e){dialButton.setEnabled(false);answerButton.setEnabled(false);endButton.setEnabled(false);}
     }
     private String lastInbox="";
