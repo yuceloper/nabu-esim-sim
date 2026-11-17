@@ -1,0 +1,17 @@
+# Private diagnostic material
+nabu-cellular-v*/
+nabu-diagnostics-*/
+*.zip
+*.apk
+*.so
+*.mbn
+*.mdt
+*.b[0-9][0-9]
+*.img
+*.bin
+*.log
+*.pem
+*.key
+vsimd
+qcrild
+.DS_Store
