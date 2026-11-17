@@ -65,10 +65,14 @@ public class LinkService extends Service {
         Intent open=new Intent(this,MainActivity.class);
         PendingIntent pi=PendingIntent.getActivity(this,0,open,PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
         PendingIntent stop=PendingIntent.getService(this,1,new Intent(this,LinkService.class).setAction("STOP"),PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
-        return new Notification.Builder(this,CHANNEL).setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("Nabu Link • "+title).setContentText(body.split("\\n",2)[0])
+        return new Notification.Builder(this,CHANNEL).setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Nabu Link • "+title).setContentText(notificationSummary())
             .setContentIntent(pi).setOngoing(true).setOnlyAlertOnce(true).setVisibility(Notification.VISIBILITY_PRIVATE)
             .addAction(new Notification.Action.Builder(null,"Disconnect",stop).build()).build();
+    }
+    private String notificationSummary(){
+        for(String line:body.split("\\n"))if(line.startsWith("Signal:"))return "Remote modem • "+line;
+        return body.split("\\n",2)[0];
     }
     private void runOnUiThread(Runnable r){handler.post(r);}
     @Override public void onCreate(){
