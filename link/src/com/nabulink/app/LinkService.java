@@ -43,6 +43,9 @@ public class LinkService extends Service {
     private CallBridge calls;
     private AudioRouteMonitor audio;
     public static volatile String remoteAudio="Unavailable";
+    public static volatile String historyView="",historyResult="";
+    public static volatile boolean historyAllowed,historyBusy;
+    private int historyGeneration;
     public static volatile String callInfo="{}",callResult="";
     public static volatile boolean callBusy;
     private String ringingEpoch="";
@@ -124,6 +127,8 @@ public class LinkService extends Service {
     @Override public int onStartCommand(Intent i,int flags,int id){
         if(i==null||"STOP".equals(i.getAction())){stopSelf();return START_NOT_STICKY;}
         String action=i.getAction();
+        if("SMS_HISTORY_CLEAR".equals(action)){clearHistory();return START_NOT_STICKY;}
+        if("SMS_HISTORY".equals(action)){loadHistory();return START_NOT_STICKY;}
         if("AUDIO_REFRESH".equals(action)){if(hostMode)audio.ensureProxy();return START_NOT_STICKY;}
         if("CALL_CONTROL".equals(action)){sendCall(i.getStringExtra("op"),i.getStringExtra("number"),i.getStringExtra("epoch"));return START_NOT_STICKY;}
         if("SMS_SEND".equals(action)){sendSms(i.getStringExtra("to"),i.getStringExtra("text"));return START_NOT_STICKY;}
@@ -212,7 +217,7 @@ public class LinkService extends Service {
                                 if(!running||!session.equals(token))continue;
                                 Pairing.save(this,"host",secret);
                                 sms.clearMessages();
-                                getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_enabled",false).putBoolean("calls_enabled",false).apply();
+                                getSharedPreferences("link",MODE_PRIVATE).edit().putBoolean("sms_enabled",false).putBoolean("sms_history_enabled",false).putBoolean("calls_enabled",false).apply();
                                 runOnUiThread(()->{if(running&&session.equals(token))show("Phone host active","Tablet paired");});
                             }catch(Exception e){runOnUiThread(()->{if(running&&session.equals(token))show("Phone host active","Pairing rejected or timed out");});}
                             finally{pairingSocket=null;}
@@ -235,7 +240,7 @@ public class LinkService extends Service {
         },"link-host").start();
     }
     private synchronized void stopHost(){if(sms!=null)sms.stop();if(audio!=null)audio.stop();running=false;hostMode=false;pairUntil=0;cancelPair();unadvertise();token=null;hostInfo="";try{if(listener!=null)listener.close();}catch(IOException ignored){}listener=null;}
-    private void disconnect(){remoteAudio="Unavailable";callInfo="{}";callResult="";callBusy=false;ringingEpoch="";try{getSystemService(NotificationManager.class).cancel(33);}catch(RuntimeException ignored){}smsAllowed=false;smsInbox="[]";smsBusy=false;smsState="";pendingId="";notifiedId="";stopClientDiscovery();connectedIp="";cancelPair();pairingClient=false;watching=false;generation.incrementAndGet();handler.removeCallbacksAndMessages(null);show("Disconnected","");}
+    private void disconnect(){historyAllowed=false;clearHistory();remoteAudio="Unavailable";callInfo="{}";callResult="";callBusy=false;ringingEpoch="";try{getSystemService(NotificationManager.class).cancel(33);}catch(RuntimeException ignored){}smsAllowed=false;smsInbox="[]";smsBusy=false;smsState="";pendingId="";notifiedId="";stopClientDiscovery();connectedIp="";cancelPair();pairingClient=false;watching=false;generation.incrementAndGet();handler.removeCallbacksAndMessages(null);show("Disconnected","");}
     private void stopClientDiscovery(){
         NsdManager.DiscoveryListener l=clientDiscovery;clientDiscovery=null;resolveQueue.clear();seenServices.clear();discovered.clear();
         if(l!=null)try{getSystemService(NsdManager.class).stopServiceDiscovery(l);}catch(RuntimeException ignored){}
@@ -330,7 +335,7 @@ public class LinkService extends Service {
             final String a=heading,b=description,successIp=found;final JSONObject remoteSms=smsData,remoteCall=callData;final String route=audioData;
             runOnUiThread(()->{if(destroyed||!watching||generation.get()!=g)return;show(a,b);
                 if(!successIp.isEmpty()){updateSms(remoteSms);updateCall(remoteCall);remoteAudio=route;connectedIp=successIp;failures=0;stopClientDiscovery();getSharedPreferences("link",MODE_PRIVATE).edit().putString("last_ip",successIp).apply();}
-                else {failures++;smsAllowed=false;remoteAudio="Unavailable";updateCall(null);}
+                else {failures++;smsAllowed=false;historyAllowed=false;clearHistory();remoteAudio="Unavailable";updateCall(null);}
                 handler.postDelayed(()->poll(secret,g),successIp.isEmpty()?3000:3000);
             });
         },"link-client").start();
@@ -370,7 +375,28 @@ public class LinkService extends Service {
             runOnUiThread(()->{if(!destroyed&&generation.get()==g){callBusy=false;callResult=response;}});
         },"link-call").start();
     }
+    private void clearHistory(){historyGeneration++;historyView="";historyResult="";historyBusy=false;}
+    private void loadHistory(){
+        if(!watching||!historyAllowed||historyBusy||connectedIp.isEmpty())return;
+        String secret=Pairing.load(this,"client");if(secret==null)return;
+        final int g=generation.get(),h=++historyGeneration;final String ip=connectedIp;
+        historyBusy=true;historyResult="Loading...";historyView="";
+        new Thread(()->{
+            String result="History unavailable",view="";
+            try{
+                JSONObject req=new JSONObject().put("op","sms_history");
+                JSONObject response=exchange(ip,secret,5000,req.toString().getBytes("UTF-8"));
+                result=response.optString("state","unknown");
+                if("ok".equals(result)){org.json.JSONArray list=response.optJSONArray("messages");StringBuilder b=new StringBuilder();
+                    if(list!=null)for(int i=0;i<list.length();i++){JSONObject m=list.optJSONObject(i);if(m==null)continue;b.append(m.optString("direction")).append(" • ").append(m.optString("from")).append(" • ").append(java.text.DateFormat.getDateTimeInstance().format(new Date(m.optLong("time")))).append("\n").append(m.optString("text"));if(m.optBoolean("truncated"))b.append("…");b.append("\n\n");}
+                    view=b.toString();result=view.isEmpty()?"No messages":"Recent phone SMS";
+                }
+            }catch(Exception ignored){}
+            final String state=result,body=view;runOnUiThread(()->{if(!destroyed&&generation.get()==g&&historyGeneration==h&&historyAllowed){historyBusy=false;historyResult=state;historyView=body;}});
+        },"link-history").start();
+    }
     private void updateSms(JSONObject data){
+        historyAllowed=data!=null&&data.optBoolean("historyAllowed");if(!historyAllowed)clearHistory();
         smsAllowed=data!=null&&data.optBoolean("sendAllowed");
         org.json.JSONArray list=data==null?null:data.optJSONArray("messages");
         smsInbox=list==null?"[]":list.toString();
