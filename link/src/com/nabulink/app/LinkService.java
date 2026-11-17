@@ -2,6 +2,10 @@ package com.nabulink.app;
 
 import android.app.*;
 import android.content.Intent;
+import android.net.nsd.*;
+import android.os.SystemClock;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import android.os.IBinder;
 import android.os.Bundle;
 import android.os.Handler;
@@ -30,6 +34,15 @@ public class LinkService extends Service {
     private volatile boolean running, destroyed;
     private volatile String token;
     private boolean watching;
+    private volatile long pairUntil;
+    public static volatile String verification="";
+    private volatile CountDownLatch approval;
+    private volatile boolean approved;
+    private volatile Socket pairingSocket;
+    private volatile NsdManager.RegistrationListener registration;
+    private volatile boolean hostMode;
+    private volatile boolean pairingClient;
+    public static final String TYPE="_nabulink._tcp.";
     public static volatile String title="Disconnected", body="";
     public static volatile String hostInfo="";
     public static volatile boolean active;
@@ -82,11 +95,53 @@ public class LinkService extends Service {
     @Override public IBinder onBind(Intent i){return null;}
     @Override public int onStartCommand(Intent i,int flags,int id){
         if(i==null||"STOP".equals(i.getAction())){stopSelf();return START_NOT_STICKY;}
+        String action=i.getAction();
+        if("APPROVE".equals(action)||"REJECT".equals(action)){
+            CountDownLatch l=approval;if(l!=null){approved="APPROVE".equals(action);l.countDown();}return START_NOT_STICKY;
+        }
+        if("ALLOW".equals(action)&&hostMode&&running){pairUntil=SystemClock.elapsedRealtime()+60000;show("Phone host active","Pairing allowed for 60 seconds");return START_NOT_STICKY;}
+        if("FORGET".equals(action)){cancelPair();Pairing.forget(this);stopSelf();return START_NOT_STICKY;}
         active=true;title="Starting";body="";startForeground(NOTIFICATION,notification());
-        if("HOST".equals(i.getAction())){stopHost();startHost();}
-        else if("CLIENT".equals(i.getAction()))connect(i.getStringExtra("ip"),i.getStringExtra("secret"));
+        if("HOST".equals(action)){stopHost();startHost();}
+        else if("PAIR".equals(action)){startPair(i.getStringExtra("ip"));}
+        else if("CLIENT".equals(action)){String secret=Pairing.load(this,"client");if(secret==null)startPair(i.getStringExtra("ip"));else connect(i.getStringExtra("ip"),secret);}
         else stopSelf();
         return START_NOT_STICKY;
+    }
+    private void advertise(){
+        NsdServiceInfo info=new NsdServiceInfo();info.setServiceType(TYPE);info.setServiceName("Nabu Link "+android.os.Build.MODEL);info.setPort(PORT);
+        NsdManager.RegistrationListener l=new NsdManager.RegistrationListener(){
+            public void onServiceRegistered(NsdServiceInfo n){}
+            public void onRegistrationFailed(NsdServiceInfo n,int e){if(registration==this)runOnUiThread(()->show("Phone host active","Discovery failed; restart host"));}
+            public void onServiceUnregistered(NsdServiceInfo n){}
+            public void onUnregistrationFailed(NsdServiceInfo n,int e){}
+        };registration=l;
+        try{getSystemService(NsdManager.class).registerService(info,NsdManager.PROTOCOL_DNS_SD,l);}catch(RuntimeException e){registration=null;}
+    }
+    private synchronized void unadvertise(){NsdManager.RegistrationListener l=registration;registration=null;if(l!=null)try{getSystemService(NsdManager.class).unregisterService(l);}catch(RuntimeException ignored){}}
+    private boolean confirm(String code)throws Exception{
+        CountDownLatch l=new CountDownLatch(1);approval=l;approved=false;verification=code;
+        runOnUiThread(()->show("Compare pairing codes","Confirm in both applications"));
+        try{return l.await(60,TimeUnit.SECONDS)&&approved&&!destroyed;}
+        finally{if(approval==l){approval=null;verification="";}}
+    }
+    private void cancelPair(){CountDownLatch l=approval;if(l!=null){approved=false;l.countDown();}try{if(pairingSocket!=null)pairingSocket.close();}catch(IOException ignored){}verification="";}
+    private void startPair(String ip){
+        if(ip==null||pairingClient)return;
+        stopHost();disconnect();pairingClient=true;final int g=generation.get();show("Pairing","Waiting for phone approval...");
+        new Thread(()->{
+            try(Socket socket=new Socket()){
+                pairingSocket=socket;InetAddress target=InetAddress.getByName(ip);if(!target.isSiteLocalAddress())throw new IOException("Private LAN only");
+                socket.connect(new InetSocketAddress(target,PORT),4000);socket.setSoTimeout(75000);
+                DataOutputStream out=new DataOutputStream(socket.getOutputStream());DataInputStream in=new DataInputStream(socket.getInputStream());
+                out.writeInt(Pairing.MAGIC);out.flush();if(in.readByte()!=1)throw new IOException("Allow pairing on phone");
+                String secret=Pairing.exchange(in,out,false,this::confirm);
+                if(destroyed||generation.get()!=g)return;
+                Pairing.save(this,"client",secret);
+                runOnUiThread(()->{if(!destroyed&&generation.get()==g){pairingClient=false;connect(ip,secret);}});
+            }catch(Exception e){runOnUiThread(()->{if(!destroyed&&generation.get()==g){pairingClient=false;show("Pairing failed","Allow pairing on phone and try again.");}});}
+            finally{pairingSocket=null;}
+        },"link-pair").start();
     }
     private String addresses()throws Exception{
         StringBuilder s=new StringBuilder();
@@ -104,31 +159,47 @@ public class LinkService extends Service {
         return j;
     }
     private synchronized void startHost(){
-        if(running)return;disconnect();token=hex(randomBytes(16));final String session=token;running=true;
+        if(running)return;disconnect();hostMode=true;pairUntil=0;token=hex(randomBytes(16));final String session=token;running=true;
         new Thread(()->{
             try(ServerSocket server=new ServerSocket()){
                 synchronized(this){if(!running||!session.equals(token))return;server.setReuseAddress(true);server.bind(new InetSocketAddress(PORT));listener=server;}
-                final String info=addresses()+"Session code: "+session;
-                runOnUiThread(()->{if(running&&session.equals(token)){hostInfo=info;show("Phone host active","Waiting for paired tablet");}});
+                final String info="Phone discoverable • "+android.os.Build.MODEL;
+                runOnUiThread(()->{if(running&&session.equals(token)){hostInfo=info;advertise();show("Phone host active","Waiting for paired tablet");}});
                 while(running&&session.equals(token)){
                     try(Socket peer=server.accept()){
                         if(!peer.getInetAddress().isSiteLocalAddress())continue;
                         peer.setSoTimeout(3000);
                         DataInputStream in=new DataInputStream(peer.getInputStream());DataOutputStream out=new DataOutputStream(peer.getOutputStream());
+                        int mode=in.readInt();
+                        if(mode==Pairing.MAGIC){
+                            if(SystemClock.elapsedRealtime()>pairUntil||pairUntil==0){out.writeByte(0);out.flush();continue;}
+                            pairUntil=0;peer.setSoTimeout(75000);pairingSocket=peer;
+                            try{
+                                out.writeByte(1);out.flush();
+                                String secret=Pairing.exchange(in,out,true,this::confirm);
+                                if(!running||!session.equals(token))continue;
+                                Pairing.save(this,"host",secret);
+                                runOnUiThread(()->{if(running&&session.equals(token))show("Phone host active","Tablet paired");});
+                            }catch(Exception e){runOnUiThread(()->{if(running&&session.equals(token))show("Phone host active","Pairing rejected or timed out");});}
+                            finally{pairingSocket=null;}
+                            continue;
+                        }
+                        if(mode!=PROTOCOL)continue;
+                        String secret=Pairing.load(this,"host");if(secret==null)continue;
                         byte[] client=new byte[16],host=randomBytes(16);
-                        if(in.readInt()!=PROTOCOL)continue;in.readFully(client);out.write(host);out.flush();
-                        byte[] req=receive(in,session,aad((byte)1,client,host));
+                        in.readFully(client);out.write(host);out.flush();
+                        byte[] req=receive(in,secret,aad((byte)1,client,host));
                         if(req.length!=1||req[0]!=1)continue;
                         if(!running||!session.equals(token))continue;
-                        send(out,session,aad((byte)2,client,host),snapshot().toString().getBytes("UTF-8"));
+                        send(out,secret,aad((byte)2,client,host),snapshot().toString().getBytes("UTF-8"));
                     }catch(Exception e){if(server.isClosed())break;}
                 }
             }catch(Exception e){runOnUiThread(()->{if(session.equals(token))show("Host error",String.valueOf(e.getMessage()));});}
             finally{synchronized(this){if(session.equals(token)){running=false;listener=null;}}}
         },"link-host").start();
     }
-    private synchronized void stopHost(){running=false;token=null;hostInfo="";try{if(listener!=null)listener.close();}catch(IOException ignored){}listener=null;}
-    private void disconnect(){watching=false;generation.incrementAndGet();handler.removeCallbacksAndMessages(null);show("Disconnected","");}
+    private synchronized void stopHost(){running=false;hostMode=false;pairUntil=0;cancelPair();unadvertise();token=null;hostInfo="";try{if(listener!=null)listener.close();}catch(IOException ignored){}listener=null;}
+    private void disconnect(){cancelPair();pairingClient=false;watching=false;generation.incrementAndGet();handler.removeCallbacksAndMessages(null);show("Disconnected","");}
     private void connect(String ip,String secret){
         if(ip==null||secret==null){stopSelf();return;}
         if(!ip.matches("[0-9.]{7,15}")||!secret.matches("[0-9a-f]{32}")){stopSelf();return;}
