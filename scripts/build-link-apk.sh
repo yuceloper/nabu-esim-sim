@@ -10,9 +10,11 @@ done
 platform="$sdk/platforms/android-33/android.jar"
 [[ -f "$platform" ]] || { echo "Install Android SDK Platform 33" >&2; exit 1; }
 out=build/link-apk
+mkdir -p "$out"
+rm -rf "$out/classes" "$out/dex"
 mkdir -p "$out/classes" "$out/dex"
-javac --release 8 -classpath "$platform" -d "$out/classes" link/src/com/nabulink/app/MainActivity.java
-"$bt/d8" --min-api 28 --lib "$platform" --output "$out/dex" "$out/classes/com/nabulink/app/MainActivity.class"
+javac --release 8 -classpath "$platform" -d "$out/classes" link/src/com/nabulink/app/*.java
+"$bt/d8" --min-api 28 --lib "$platform" --output "$out/dex" "$out"/classes/com/nabulink/app/*.class
 "$bt/aapt" package -f -M link/AndroidManifest.xml -I "$platform" -F "$out/unsigned.apk"
 (cd "$out/dex" && zip -q ../unsigned.apk classes.dex)
 "$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/aligned.apk"
