@@ -62,6 +62,7 @@ final class SmsBridge {
         if(registered){try{context.unregisterReceiver(incoming);}catch(Exception ignored){}try{context.unregisterReceiver(sent);}catch(Exception ignored){}registered=false;}
         synchronized(this){inbox.clear();results.clear();}
     }
+    synchronized void clearMessages(){inbox.clear();}
     synchronized JSONObject status()throws JSONException{
         JSONArray messages=new JSONArray();
         if(enabled()&&allowed(Manifest.permission.RECEIVE_SMS)){
